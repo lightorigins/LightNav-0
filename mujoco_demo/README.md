@@ -1,22 +1,23 @@
 # mujoco_demo
 
-A small, self-contained TurtleBot vision-language-navigation simulation
-(Python package `vln_mujoco`): it runs
+A small vision-language-navigation simulation (Python package `vln_mujoco`):
+it runs
 in the fixed MolmoSpaces ProcTHOR 10K validation `val_2` multi-room scene, using
-the ceiling MJCF variant, TurtleBot kinematics, and MuJoCo RGB camera rendering,
-with a single web page for VLN instructions, live view, WASD driving, emergency
-stop, reset, and state readout.
+the ceiling MJCF variant, MuJoCo RGB camera rendering, and either the bundled
+TurtleBot or an external MicroDuck model and walking policy. A single web page
+provides VLN instructions, live view, WASD driving, emergency stop, reset, and
+state readout.
 
 ## Highlights
 
 - One scene: only the MolmoSpaces resources actually referenced by
   `val_2_ceiling` are bundled — no full dataset download required;
-- One robot: a differential-drive TurtleBot geometry defined in-project, with no
-  external meshes;
+- Two robot modes: a differential-drive TurtleBot defined in-project, or an
+  optional dynamically simulated MicroDuck driven by an ONNX walking policy;
 - One process: Python runs MuJoCo, the web page, and the VLN WebSocket client
   together;
-- Pure kinematics: velocity commands are integrated directly into the TurtleBot
-  pose — no motors, gravity, or contact dynamics;
+- TurtleBot commands are integrated kinematically; MicroDuck runs gravity,
+  contacts, 14 position actuators, and policy inference at 50 Hz;
 - Two views: the web page switches live between the robot's first-person RGB
   and a rear-elevated third-person follow camera;
 - On-change state sync: web state is pushed only when the robot, VLN, control
@@ -25,7 +26,7 @@ stop, reset, and state readout.
   `stop=true` ends the task and releases control automatically;
 - MPC control: the same CasADi/IPOPT unicycle MPC, parameters, and
   capture-time pose alignment as `robot_deploy`'s `vln_mpc`;
-- No ROS 2, no Node.js, no locomotion policy;
+- No ROS 2 or Node.js; the default TurtleBot mode needs no locomotion policy;
 - The web interaction and VLN server protocol are compatible with
   `robot_deploy`'s `vln_web` and `vln_client`.
 
@@ -46,6 +47,34 @@ address can also be set at startup:
 ./run.sh --host 0.0.0.0 --port 8088
 ```
 
+### MicroDuck (optional)
+
+MicroDuck support deliberately keeps the robot MJCF, meshes, and walking policy
+outside this repository. Obtain those files from their owners under terms that
+permit your use, then start the demo with the optional ONNX Runtime dependency:
+
+```bash
+MUJOCO_GL=egl uv run --extra microduck vln-mujoco \
+  --host 0.0.0.0 \
+  --vln-server ws://127.0.0.1:8050 \
+  --robot microduck \
+  --robot-model /path/to/microduck_rl/src/mjlab_microduck/robot/microduck/robot_allcollisions.xml \
+  --walking-policy /path/to/alpha_walking.onnx
+```
+
+The MJCF must provide `trunk_base`, `trunk_base_freejoint`, `head_camera`, the
+`imu_ang_vel` three-axis sensor, and 14 joint actuators. The ONNX policy must
+accept one `[1, 61]` float32 observation, return one `[1, 14]` float32 action,
+and provide `joint_names`, `default_joint_pos`, `action_scale`,
+`observation_names`, and `command_names` metadata. Actuator order must match
+`joint_names`; incompatible files fail at startup instead of running with an
+incorrect joint mapping.
+
+The head camera is used for LightNav input, while MuJoCo trunk pose and velocity
+provide MPC feedback. Commands are clipped to the policy range (`±0.30 m/s`,
+`±1.50 rad/s`); small non-zero linear commands enter the stable walking range,
+while commands inside the stop deadband remain zero.
+
 Pressing space or clicking `STOP` on the page zeroes the velocity immediately.
 Manual commands also auto-zero when not refreshed for 350 ms.
 
@@ -60,9 +89,9 @@ PORT=8050 CUDA_VISIBLE_DEVICES=0 lightnav-serve \
 ```
 
 Then paste `ws://<gpu-host>:8050` into the console's **VLN Server WebSocket**
-field, type an instruction, and press **Start VLN**. The simulated TurtleBot
-streams its first-person frames to the server and tracks the returned waypoints
-with the MPC — the same client protocol and controller the real robots use in
+field, type an instruction, and press **Start VLN**. The selected simulated
+robot streams its first-person frames to the server and tracks the returned
+waypoints with the MPC — the same client protocol and controller the real robots use in
 [`robot_deploy/`](../robot_deploy/README.md).
 
 ## Layout
@@ -72,7 +101,7 @@ mujoco_demo/
 ├── vln_mujoco/
 │   ├── assets/        # a single MolmoSpaces scene, nothing more
 │   ├── web/           # static single page, no build step
-│   ├── robots/        # robot backend protocol + TurtleBot implementation
+│   ├── robots/        # backend protocol + TurtleBot and MicroDuck adapters
 │   ├── model.py       # scene loading and MuJoCo compilation
 │   ├── simulation.py  # shared runtime, cameras, watchdog, frame capture
 │   ├── mpc.py         # CasADi/IPOPT kinematic MPC
@@ -153,6 +182,7 @@ endorsed by Open Robotics or ROBOTIS.
 
 - The TurtleBot is a lightweight geometry drawn for this project, not the
   official high-fidelity TurtleBot3 mesh;
+- MicroDuck mode requires external MJCF assets and a compatible ONNX policy;
 - The spawn pose is fixed at `(x=6.5, y=13.8, yaw=0)` and environment objects
   are frozen;
 - RGB only for now, at a camera resolution of `480 × 270`;

@@ -1,7 +1,7 @@
 [project]
 name = "vln-mujoco"
 version = "0.1.0"
-description = "A small self-contained TurtleBot VLN simulator in one MolmoSpaces scene."
+description = "A small robot-backend VLN simulator in one MolmoSpaces scene."
 readme = "README.md"
 authors = [{ name = "Light Origins" }]
 license = "Apache-2.0"
@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+microduck = ["onnxruntime>=1.24"]
 
 [project.scripts]
 vln-mujoco = "vln_mujoco.__main__:main"

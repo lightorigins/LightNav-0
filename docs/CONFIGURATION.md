@@ -100,6 +100,20 @@ wins.
 | `--record_fps`, `--record_timeline`, `--no_record_images` | `RECORD_FPS`, `RECORD_TIMELINE`, `RECORD_IMAGES` | `10`, `realtime`, images on | recording defaults written to the manifest / frame storage |
 | `--cam_hfov_deg`, `--cam_height`, `--traj_forward_offset`, `--waypoint_dt_s` | `CAM_HFOV_DEG`, `CAM_HEIGHT`, `TRAJ_FORWARD_OFFSET`, `WAYPOINT_DT_S` | `90`, `0.5`, auto, `0.1` | client-camera geometry and HUD convention used only by the rendered overlay |
 
+### MuJoCo demo parameters
+
+`mujoco_demo` is a separate `uv` project. Run `./run.sh` for its bundled
+TurtleBot, or use `uv run --extra microduck vln-mujoco ...` when selecting the
+optional MicroDuck backend.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--host` / `--port` | `127.0.0.1` / `8088` | web-console bind address |
+| `--vln-server` | empty | default LightNav WebSocket URL shown in the console |
+| `--robot` | `turtlebot` | robot backend: `turtlebot` or `microduck` |
+| `--robot-model` | none | external MicroDuck MJCF; required only with `--robot microduck` |
+| `--walking-policy` | none | external MicroDuck ONNX policy; required only with `--robot microduck` |
+
 Engine-level environment variables (no flag):
 
 | Variable | Default | Meaning |
@@ -160,4 +174,3 @@ Frames within one session must share one size (the first frame decides; `reset` 
 over). `keep` avoids geometric distortion but changes the token grid the model sees, which
 the released checkpoint was not trained on — validate on your robot before relying on it.
 Full native resolution (feeding the camera's own pixel count) is not supported.
-
