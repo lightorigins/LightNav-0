@@ -89,6 +89,8 @@ wins.
 | `--gpu_memory_utilization` | `GPU_MEM_UTIL` | `0.85` | fraction of GPU memory handed to the vLLM engine |
 | `--max_batch_size` | `MAX_BATCH_SIZE` | `8` | max sessions per scheduler tick; also sizes vLLM `max_num_seqs`. `1` = strictly serial |
 | `--max_wait_ms` | `MAX_WAIT_MS` | `8` | max wait to fill a batch; a lone request is flushed after 2 ms |
+| `--quantization` | `VLLM_QUANT` | none (bf16) | `fp8_llm_only`: fp8 LLM, bf16 ViT (~1.5× on Jetson Thor). On SM 11.0 also set `VLLM_DISABLED_KERNELS`; `scripts/serve_thor.sh` does both. See [JETSON_THOR.md](JETSON_THOR.md) |
+| `--vit_cache_entries` | `VLN_VIT_CACHE_ENTRIES` | auto (512 w/ SlowFast) | ViT tubelet LRU capacity (`vllm_local`; speed only, never output). Long robot sessions want `1024` |
 | `--num_history_frames` | `NUM_HISTORY_FRAMES` | checkpoint config | history-window override (normally leave unset) |
 | `--pool_spatial` | `POOL_SPATIAL` | checkpoint config | spatial-pooling override |
 | `--aspect_mode` | `ASPECT_MODE` | `stretch` | `stretch`: resize every frame to `video_size` (training behaviour); `keep`: per-session size with the camera's aspect ratio at the same pixel budget (4:3 → 288×384 for a 256×448 checkpoint) |

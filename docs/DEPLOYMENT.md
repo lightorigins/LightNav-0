@@ -12,6 +12,11 @@ panel, and robot adapters (Unitree Go2, LimX TRON1) — lives in
 [`mujoco_demo/`](../mujoco_demo/README.md) exercises the same protocol and MPC
 against a simulated TurtleBot, no robot required.
 
+The GPU host does not have to be remote: [JETSON_THOR.md](JETSON_THOR.md) documents
+serving the model **onboard** from a robot's own NVIDIA Jetson Thor (SM 11.0 kernel
+pitfalls, unified-memory budgeting, ViT-cache sizing, a measured 4+ Hz closed loop),
+with a matching launcher in [`scripts/serve_thor.sh`](../scripts/serve_thor.sh).
+
 ```
  robot (any language)                                GPU host
  ┌──────────────────────────┐    ws://host:8050     ┌────────────────────────────┐
