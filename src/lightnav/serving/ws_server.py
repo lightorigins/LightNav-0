@@ -130,6 +130,16 @@ def _optional_float_env(name: str) -> float | None:
         raise SystemExit(f"{name} must be a number, got {raw!r}") from None
 
 
+def _int_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from None
+
+
 def _build_recorder(args: argparse.Namespace):
     """Create the local episode recorder for ``--record_dir`` (None when recording is off).
 
@@ -184,6 +194,8 @@ def _build_engine(args: argparse.Namespace):
         max_num_seqs=args.max_batch_size,
         num_history_frames=args.num_history_frames,
         aspect_mode=getattr(args, "aspect_mode", "stretch"),
+        quantization=getattr(args, "quantization", None),
+        vit_cache_entries=getattr(args, "vit_cache_entries", None),
     )
     if args.pool_spatial is not None:
         cfg.pool_spatial = args.pool_spatial
@@ -668,6 +680,23 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.85,
         help="vLLM gpu_memory_utilization (vllm_local only). 0.85 suits one engine per GPU.",
+    )
+    parser.add_argument(
+        "--quantization",
+        choices=["fp8_llm_only"],
+        default=(os.environ.get("VLLM_QUANT") or None),
+        help="Weight quantization (vllm_local only). Default bf16. 'fp8_llm_only' "
+        "quantizes the LLM to fp8 and keeps the ViT bf16 (~1.5x on Jetson Thor). "
+        "On SM 11.0 also set VLLM_DISABLED_KERNELS; scripts/serve_thor.sh does both. "
+        "Env: VLLM_QUANT.",
+    )
+    parser.add_argument(
+        "--vit_cache_entries",
+        type=int,
+        default=_int_env("VLN_VIT_CACHE_ENTRIES"),
+        help="ViT tubelet LRU capacity (vllm_local; speed only, never output). "
+        "Default: auto (512 with SlowFast). Long robot sessions want 1024. "
+        "Env: VLN_VIT_CACHE_ENTRIES.",
     )
     parser.add_argument(
         "--num_history_frames",

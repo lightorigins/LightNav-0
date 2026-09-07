@@ -74,6 +74,7 @@ class VLNInferenceEngine:
         max_new_tokens: int = 64,
         enable_vit_cache: bool = True,
         aspect_mode: str = "stretch",
+        vit_cache_entries: int | None = None,
     ):
         if aspect_mode not in ("stretch", "keep"):
             raise ValueError(f"aspect_mode must be 'stretch' or 'keep', got {aspect_mode!r}")
@@ -85,11 +86,18 @@ class VLNInferenceEngine:
         self.enable_vit_cache = enable_vit_cache
         cache_cap = max(32, int(self.bundle.num_history_frames) * 2)
         if getattr(self.bundle, "slowfast_tiers", None):
-            # SlowFast reuses the SAME absolute tubelets across the whole episode
-            # (burst/span pairs recur every few steps). A 128-entry LRU evicts
-            # them before reuse; 512 holds a full episode so only the newest
-            # tubelet misses each step. Cache size affects speed only, never output.
+            # SlowFast reuses the SAME absolute tubelets across the episode
+            # (burst/span pairs recur every few steps), so a bigger LRU turns
+            # those into hits. 512 covers a typical episode (~2 min at 4 Hz);
+            # longer robot sessions evict the mid/span tiers before reuse and
+            # misses climb ~1.0 -> ~3.4 per step, which is what vit_cache_entries
+            # is for. Cache size affects speed only, never output.
             cache_cap = max(cache_cap, 512)
+        # Explicit override (--vit_cache_entries / VLN_VIT_CACHE_ENTRIES). Measured
+        # on a Jetson AGX Thor at gpu_memory_utilization 0.60: 1024 stays flat
+        # through ~5 min sessions; 2048 exceeded the remaining headroom there.
+        if vit_cache_entries is not None:
+            cache_cap = max(32, int(vit_cache_entries))
         self._vit_cache_max_entries = cache_cap
         self._vit_cache = VitTubeletCache(max_entries=cache_cap)
         # Pinned staging buffers for the packed-embeds D2H copy, one per batch slot
@@ -724,6 +732,7 @@ def build_engine(
             vllm_engine=llm,
             max_new_tokens=max_tok,
             aspect_mode=config.aspect_mode,
+            vit_cache_entries=config.vit_cache_entries,
         )
     elif backend == "hf":
         bundle = load_hf_model(config, task_type=task_type)

@@ -134,6 +134,8 @@ def _engine_args(**overrides) -> Namespace:
         max_batch_size=16,
         pool_spatial=None,
         num_history_frames=128,
+        quantization=None,
+        vit_cache_entries=None,
     )
     fields.update(overrides)
     return Namespace(**fields)
@@ -175,6 +177,52 @@ def test_build_engine_maps_vln_task_to_vlnce_and_allows_config_history(monkeypat
     assert seen["task_type"] == "vlnce"
     assert seen["cfg"].num_history_frames is None
     assert seen["cfg"].pool_spatial == 2
+
+
+def test_build_engine_plumbs_quantization_and_vit_cache(monkeypatch):
+    seen = {}
+
+    def fake_build_engine(cfg, task_type, max_new_tokens):
+        seen["cfg"] = cfg
+        return object(), object()
+
+    monkeypatch.setattr(ws_server, "build_engine", fake_build_engine)
+    ws_server._build_engine(
+        _engine_args(quantization="fp8_llm_only", vit_cache_entries=1024)
+    )
+    assert seen["cfg"].quantization == "fp8_llm_only"
+    assert seen["cfg"].vit_cache_entries == 1024
+
+
+def test_quantization_flag_rejects_full_fp8(monkeypatch):
+    monkeypatch.delenv("VLLM_QUANT", raising=False)
+    parser = ws_server._build_parser()
+    # only fp8_llm_only is a valid choice; plain "fp8" must be rejected
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--model_path", "/m", "--traj_vocab_path", "/v", "--quantization", "fp8"]
+        )
+    args = parser.parse_args(
+        ["--model_path", "/m", "--traj_vocab_path", "/v",
+         "--quantization", "fp8_llm_only"]
+    )
+    assert args.quantization == "fp8_llm_only"
+
+
+def test_quantization_and_cache_env_defaults(monkeypatch):
+    monkeypatch.setenv("VLLM_QUANT", "fp8_llm_only")
+    monkeypatch.setenv("VLN_VIT_CACHE_ENTRIES", "1024")
+    args = ws_server._build_parser().parse_args(
+        ["--model_path", "/m", "--traj_vocab_path", "/v"]
+    )
+    assert args.quantization == "fp8_llm_only"
+    assert args.vit_cache_entries == 1024
+
+    monkeypatch.setenv("VLN_VIT_CACHE_ENTRIES", "not-an-int")
+    with pytest.raises(SystemExit):
+        ws_server._build_parser().parse_args(
+            ["--model_path", "/m", "--traj_vocab_path", "/v"]
+        )
 
 
 def test_engine_task_mapping_rejects_unknown_tasks():

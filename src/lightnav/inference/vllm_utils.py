@@ -235,8 +235,121 @@ def get_vllm_model(llm) -> torch.nn.Module:
     )
 
 
+_fp8_llm_only_patched = False
+
+
+def _vllm_release(version: str) -> "tuple[int, int, int] | None":
+    """Parse the (major, minor, patch) release from a vLLM version string.
+
+    Strips any epoch/local/pre suffix (``0.19.1+cu132`` -> ``(0, 19, 1)``) so a
+    build-tagged wheel compares equal to the plain release, while ``0.19.10``
+    correctly does NOT equal ``0.19.1``. Returns None if unparseable.
+    """
+    import re
+
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", str(version))
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def _patch_fp8_llm_only() -> None:
+    """Make vLLM's on-the-fly fp8 skip the vision tower (``visual.*`` linears).
+
+    Selected with ``VLLM_QUANT=fp8_llm_only``: the engine is loaded with
+    ``quantization="fp8"`` and this patch keeps every ``visual.*`` linear in
+    bf16, so ViT output stays bit-identical to the unquantized model while the
+    LLM half takes the fp8 speedup.
+
+    Why not plain full-model ``VLLM_QUANT=fp8``: quantizing the ViT both
+    corrupts perception (measured on a 348-step tracking replay: 91
+    visible-flag flips, 121 stop/go flips) and *slows* the ViT ~2x, because
+    per-linear dynamic-quant overhead dominates its small eager-mode GEMMs.
+    LLM-only measured near-parity with bf16 (97.4% stop agreement, waypoint
+    displacement p50 4.4 cm) at a ~1.5x per-step speedup — 268 -> 178 ms
+    (3.7 -> 5.6 Hz) on a Jetson AGX Thor, see docs/JETSON_THOR.md.
+
+    Idempotent: patching twice would chain the wrapper onto itself.
+    """
+    global _fp8_llm_only_patched
+    if _fp8_llm_only_patched:
+        return
+    import vllm as _vllm
+    from vllm.model_executor.layers.quantization import fp8 as _fp8
+
+    # This patch reaches into vLLM's private Fp8Config API; it was verified
+    # against 0.19.1. A different patch release may have moved get_quant_method's
+    # signature or the visual-prefix scheme -- warn rather than patch blindly.
+    # Compare the release tuple exactly (a local suffix like +cu132 is fine);
+    # do NOT prefix-match, or "0.19.10" would slip through as "0.19.1".
+    if _vllm_release(getattr(_vllm, "__version__", "")) != (0, 19, 1):
+        print(
+            f"[lightnav] WARNING: fp8_llm_only was verified on vLLM 0.19.1, "
+            f"found {getattr(_vllm, '__version__', '?')}; the quant patch may not "
+            f"apply correctly. Verify visual.* stays bf16.",
+            flush=True,
+        )
+
+    _orig_get_quant_method = _fp8.Fp8Config.get_quant_method
+    visual_seen = {"n": 0}
+
+    def _llm_only_get_quant_method(self, layer, prefix):
+        if isinstance(layer, _fp8.LinearBase) and (
+            prefix.startswith("visual.") or ".visual." in prefix
+        ):
+            visual_seen["n"] += 1
+            return _fp8.UnquantizedLinearMethod()
+        return _orig_get_quant_method(self, layer, prefix)
+
+    _fp8.Fp8Config.get_quant_method = _llm_only_get_quant_method
+    _fp8_llm_only_patched = True
+    # Guard against a vLLM version renaming the visual prefix: if the model
+    # loaded and NOT ONE linear matched, the vision tower was silently fp8'd
+    # (the embedding path reuses that same tower — silent perception loss).
+    # The engine calls _assert_visual_kept_bf16() after load to check this.
+    global _visual_seen_counter
+    _visual_seen_counter = visual_seen
+    print("[lightnav] quantization=fp8_llm_only: fp8 LLM, visual.* kept bf16")
+
+
+_visual_seen_counter: "dict | None" = None
+
+
+def _assert_visual_kept_bf16() -> None:
+    """Fail loudly if the fp8_llm_only prefix guard matched no visual linear.
+
+    Called once after the engine loads. A zero count means vLLM renamed the
+    vision-tower prefix and every visual linear fell through to fp8 — which the
+    embedding path would then serve as degraded perception with no other signal.
+    """
+    if _visual_seen_counter is not None and _visual_seen_counter["n"] == 0:
+        raise RuntimeError(
+            "fp8_llm_only: no 'visual.*' linear was matched during load, so the "
+            "vision tower may have been quantized to fp8 (perception risk). The "
+            "vLLM visual-module prefix likely changed; update _patch_fp8_llm_only."
+        )
+
+
+def _resolve_quantization(config: InferenceConfig) -> "str | None":
+    """``config.quantization`` -> vLLM ``quantization`` argument.
+
+    ``None`` -> bf16 (default). ``"fp8_llm_only"`` -> fp8 LLM, bf16 ViT (installs
+    the patch). Full-model ``"fp8"`` is deliberately refused: it quantizes the
+    ViT, which both corrupts perception and, because the embedding path reuses
+    that tower, has no safe fallback here.
+    """
+    quant = config.quantization or None
+    if quant is None:
+        return None
+    if quant == "fp8_llm_only":
+        _patch_fp8_llm_only()
+        return "fp8"
+    raise ValueError(
+        f"unsupported quantization {quant!r}; only 'fp8_llm_only' is supported "
+        "(full-model 'fp8' would quantize the vision tower and corrupt perception)"
+    )
+
+
 def load_vllm_engine(config: InferenceConfig, num_frames: int = 64) -> Any:
-    """Load a local vLLM LLM engine (bf16, pre-computed video embeddings enabled).
+    """Load a local vLLM LLM engine (bf16 by default; ``config.quantization``).
 
     ``num_frames`` sizes the worst-case video the engine profiles for memory
     (encoder cache + dummy ViT pass). Setting it to the actual history window
@@ -269,7 +382,7 @@ def load_vllm_engine(config: InferenceConfig, num_frames: int = 64) -> Any:
     llm = LLM(
         model=config_dir,
         dtype="bfloat16",
-        quantization=None,
+        quantization=_resolve_quantization(config),
         # Size to the history window: vision tokens scale with num_frames (~12-20
         # pooled tokens/frame) + long instructions (300-600 tokens) + template
         # overhead. A hardcoded 2048 rejects 128-frame prompts, so scale with

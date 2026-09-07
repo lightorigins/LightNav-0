@@ -341,6 +341,11 @@ def load_vllm_local(config: InferenceConfig, task_type: str = "vlnce"):
     apply_vllm_embedding_monkeypatch()
     llm = load_vllm_engine(config, num_frames=int(params["num_history_frames"]))
 
+    # fp8_llm_only reuses vLLM's own visual tower for embeddings and relies on the
+    # quant patch having kept it bf16 -- verify the prefix guard actually matched.
+    from lightnav.inference.vllm_utils import _assert_visual_kept_bf16
+    _assert_visual_kept_bf16()
+
     vit = get_vllm_model(llm).visual
     device = next(get_vllm_model(llm).parameters()).device
     vit = vit.to(device)
