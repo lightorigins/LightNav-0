@@ -1,0 +1,59 @@
+# @package _global_
+# HM3D ObjectNav v2 benchmark config (official val split: 1,000 episodes, 6 categories).
+#
+# Mirrors objectnav_hm3d_v1.yaml (same velocity-control setup, camera and agent geometry);
+# only the dataset is swapped to v2 (HM3D v0.2 scenes).
+#
+# IMPORTANT - navmesh: v2 episodes (start positions AND goal view points) were generated on
+# a navmesh baked at cell_height=0.05, while the shipped <scene>.basis.navmesh uses the
+# habitat default 0.20. On the shipped mesh every v2 view point sits a constant
+# 0.05-0.15 m below the walkable surface (per scene), geodesic_distance keeps that vertical
+# residual, and distance_to_goal gets a hard floor - at the official 0.1 m success radius
+# the benchmark then measures data alignment instead of the policy. ALWAYS run v2 with
+#   --navmesh-cell-height 0.05   (server flag; NAVMESH_CELL_HEIGHT=0.05 for the launcher)
+# which re-bakes each scene's navmesh through the public sim.recompute_navmesh API.
+# HM3D v1 / MP3D align with the shipped navmesh (audited: zero vertical offset) and must
+# be run WITHOUT that flag.
+#
+# success_distance: leave unset -> env default 0.1 m (official).
+#
+# Dataset layout: <root>/{split}/{split}.json.gz (stub) next to <root>/{split}/content/
+# holding one shard per scene; override with --data-path / --scenes-dir.
+#   scenes_dir: directory containing hm3d/val/<id>/<id>.basis.glb
+
+defaults:
+  - /benchmark/nav/objectnav: objectnav_hm3d
+  - _self_
+
+habitat:
+  environment:
+    max_episode_steps: 500
+
+  simulator:
+    turn_angle: 30
+    forward_step_size: 0.25
+    agents:
+      main_agent:
+        height: 0.88
+        radius: 0.18
+        sim_sensors:
+          rgb_sensor:
+            height: 270
+            width: 480
+            hfov: 120
+            position: [0, 0.88, 0]
+          depth_sensor:
+            height: 270
+            width: 480
+            hfov: 120
+            position: [0, 0.88, 0]
+            min_depth: 0.5
+            max_depth: 5.0
+    habitat_sim_v0:
+      allow_sliding: true
+      gpu_device_id: 0
+
+  dataset:
+    split: val
+    data_path: data/datasets/objectnav/hm3d/v2/{split}/{split}.json.gz
+    scenes_dir: data/scene_datasets

@@ -15,10 +15,11 @@ Supported benchmarks:
 | `vlnce`     | `configs/vlnce_r2r.yaml`            | val_unseen   | 1,839    | 3.0 m          |
 | `vlnce`     | `configs/vlnce_rxr.yaml`            | val_unseen   | 3,669 (en-US + en-IN) | 3.0 m          |
 | `objectnav` | `configs/objectnav_hm3d_v1.yaml`    | val          | 2,000    | 0.1 m (to a viewpoint) |
+| `objectnav` | `configs/objectnav_hm3d_v2.yaml`    | val          | 1,000    | 0.1 m; needs `--navmesh-cell-height 0.05` |
 | `objectnav` | `configs/objectnav_mp3d.yaml`       | val          | 2,195    | 0.1 m (to a viewpoint) |
 | `objectnav` | `configs/objectnav_ovon.yaml`       | val_seen / val_seen_synonyms / val_unseen | 3,000 each | 0.25 m (`--success-distance 0.25`) |
 
-All five configs render 480x270 RGB at 120 deg horizontal FOV from a camera 0.88 m above
+All six configs render 480x270 RGB at 120 deg horizontal FOV from a camera 0.88 m above
 the floor, with `allow_sliding: true` and a 500-step episode limit.
 
 ## 1. Install
@@ -93,6 +94,9 @@ data/
     objectnav/hm3d/v1/val/
       val.json.gz                                  # stub (category maps, no episodes)
       content/<scene>.json.gz                      # one shard per scene
+    objectnav/hm3d/v2/val/
+      val.json.gz                                  # v2 stub; run with --navmesh-cell-height 0.05
+      content/<scene>.json.gz
     objectnav/mp3d/v1/val/
       val.json.gz                                  # 21-category stub
       content/<scene>.json.gz
@@ -137,6 +141,11 @@ HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve --task vlnce \
 # HM3D ObjectNav v1 val (success 0.1 m = env default)
 HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve --task objectnav \
     --config habitat_server/configs/objectnav_hm3d_v1.yaml --port 5555
+
+# HM3D ObjectNav v2 val: ALWAYS re-bake the navmesh (v2 episodes were generated at
+# cell_height=0.05; the shipped .basis.navmesh is 0.20 and floors distance_to_goal)
+HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve --task objectnav \
+    --config habitat_server/configs/objectnav_hm3d_v2.yaml --navmesh-cell-height 0.05 --port 5555
 
 # MP3D ObjectNav v1 val (success 0.1 m = env default)
 HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve --task objectnav \

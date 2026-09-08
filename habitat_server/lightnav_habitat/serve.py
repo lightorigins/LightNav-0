@@ -84,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
         "Use 0.25 for HM3D-OVON.",
     )
     parser.add_argument(
+        "--navmesh-cell-height",
+        type=float,
+        default=None,
+        help="objectnav only: re-bake each scene's navmesh at this cell_height (m). "
+        "REQUIRED as 0.05 for HM3D ObjectNav v2 (its episodes were generated on a "
+        "cell_height=0.05 navmesh; the shipped one is 0.20, which floors "
+        "distance_to_goal). Leave unset for HM3D v1 / MP3D (they align with the "
+        "shipped navmesh) and by default for OVON.",
+    )
+    parser.add_argument(
         "--ready-file",
         default=None,
         help="Path touched once the simulator is initialized and the server accepts requests",
@@ -130,6 +140,10 @@ def main(argv: Optional[list] = None) -> None:
         kwargs["scenes_dir"] = args.scenes_dir
     if args.success_distance is not None:
         kwargs["success_distance"] = args.success_distance
+    if args.navmesh_cell_height is not None:
+        if args.task != "objectnav":
+            parser.error("--navmesh-cell-height only applies to --task objectnav")
+        kwargs["navmesh_cell_height"] = args.navmesh_cell_height
 
     logger.info("Starting Habitat server")
     logger.info("task=%s config=%s port=%d gpu=%d", args.task, args.config, args.port, gpu_id)

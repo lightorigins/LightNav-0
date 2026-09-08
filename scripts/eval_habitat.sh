@@ -20,6 +20,8 @@
 #   HABITAT_CONFIG       yaml (default habitat_server/configs/vlnce_r2r.yaml)
 #   SPLIT                dataset split (default: vlnce -> val_unseen; objectnav -> yaml)
 #   SUCCESS_DISTANCE     e.g. 0.25 for HM3D-OVON (default: env default)
+#   NAVMESH_CELL_HEIGHT  re-bake navmeshes at this cell_height; REQUIRED as 0.05 for
+#                        HM3D ObjectNav v2, leave unset otherwise (objectnav only)
 #   DATA_PATH, SCENES_DIR  optional dataset path overrides (see docs/HABITAT_SERVER.md)
 #   LANGUAGES            RxR only, e.g. "en-US en-IN"
 #   EPISODES             per shard; -1 = whole shard (default -1)
@@ -70,6 +72,7 @@ if [ -z "${SPLIT+x}" ]; then
     [ "$TASK" = "vlnce" ] && SPLIT=val_unseen || SPLIT=""
 fi
 SUCCESS_DISTANCE=${SUCCESS_DISTANCE:-}
+NAVMESH_CELL_HEIGHT=${NAVMESH_CELL_HEIGHT:-}
 DATA_PATH=${DATA_PATH:-}
 SCENES_DIR=${SCENES_DIR:-}
 LANGUAGES=${LANGUAGES:-}
@@ -177,6 +180,7 @@ trap cleanup EXIT INT TERM
 server_args=(--task "$TASK" --config "$HABITAT_CONFIG" --max-steps "$MAX_STEPS")
 [ -n "$SPLIT" ] && server_args+=(--split "$SPLIT")
 [ -n "$SUCCESS_DISTANCE" ] && server_args+=(--success-distance "$SUCCESS_DISTANCE")
+[ -n "$NAVMESH_CELL_HEIGHT" ] && server_args+=(--navmesh-cell-height "$NAVMESH_CELL_HEIGHT")
 [ -n "$DATA_PATH" ] && server_args+=(--data-path "$DATA_PATH")
 [ -n "$SCENES_DIR" ] && server_args+=(--scenes-dir "$SCENES_DIR")
 # shellcheck disable=SC2206

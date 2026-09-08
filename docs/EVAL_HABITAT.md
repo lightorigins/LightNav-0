@@ -1,4 +1,4 @@
-# Habitat evaluation: VLN-CE (R2R / RxR) and ObjectNav (HM3D / MP3D / HM3D-OVON)
+# Habitat evaluation: VLN-CE (R2R / RxR) and ObjectNav (HM3D v1/v2 / MP3D / HM3D-OVON)
 
 Evaluation is split across two processes:
 
@@ -15,6 +15,7 @@ Evaluation is split across two processes:
 | R2R (VLN-CE) | `habitat_server/configs/vlnce_r2r.yaml` | `val_unseen` | 1,839 | 480x270, hfov 120, height 0.88 m | 3.0 m |
 | RxR (VLN-CE) | `habitat_server/configs/vlnce_rxr.yaml` | `val_unseen` | 3,669 with `--languages en-US en-IN` (11,006 total) | same | 3.0 m |
 | HM3D ObjectNav v1 | `habitat_server/configs/objectnav_hm3d_v1.yaml` | `val` | 2,000 (20 scenes x 6 categories) | same | 0.1 m (to a viewpoint) |
+| HM3D ObjectNav v2 | `habitat_server/configs/objectnav_hm3d_v2.yaml` | `val` | 1,000 (HM3D v0.2 scenes) | same | 0.1 m; **needs `--navmesh-cell-height 0.05`** |
 | MP3D ObjectNav v1 | `habitat_server/configs/objectnav_mp3d.yaml` | `val` | 2,195 (21 categories) | same | 0.1 m (to a viewpoint) |
 | HM3D-OVON | `habitat_server/configs/objectnav_ovon.yaml` | `val_seen`, `val_seen_synonyms`, `val_unseen` | 3,000 each (36 scenes, open-vocabulary) | same | 0.25 m |
 
@@ -40,6 +41,11 @@ ObjectNav variants:
 HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve \
     --task objectnav --config habitat_server/configs/objectnav_hm3d_v1.yaml \
     --split val --port 5555
+
+# HM3D ObjectNav v2: the re-baked navmesh is REQUIRED (see "Navmesh alignment" below)
+HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve \
+    --task objectnav --config habitat_server/configs/objectnav_hm3d_v2.yaml \
+    --split val --navmesh-cell-height 0.05 --port 5555
 
 # MP3D ObjectNav v1 (same defaults as HM3D v1)
 HABITAT_SIM_GPU_ID=0 python -m lightnav_habitat.serve \
@@ -123,6 +129,37 @@ The released checkpoints ship their bundle, so no decoder flag is needed. A wron
 decoder is loaded after the inference engine, so it surfaces only once the weights are up
 (tens of seconds), not at argument-parse time.
 
+### Navmesh alignment (HM3D ObjectNav v2)
+
+HM3D ships one `<scene>.basis.navmesh` per scene, baked with the habitat defaults
+(`cell_height=0.20`). The ObjectNav **v2** episodes - start positions and goal view points
+alike - were generated on a navmesh baked at `cell_height=0.05`, so on the shipped mesh
+every v2 view point sits a constant 0.05 / 0.10 / 0.15 m (per scene) *below* the walkable
+surface. `geodesic_distance` keeps that vertical residual (`geo = sqrt(h^2 + offset^2)`), so
+`distance_to_goal` acquires a hard floor equal to the offset and the official 0.1 m success
+radius ends up measuring data alignment rather than the policy.
+
+`--navmesh-cell-height 0.05` (launcher: `NAVMESH_CELL_HEIGHT=0.05`) fixes this by re-baking
+each scene's navmesh once at load time through the public `sim.recompute_navmesh` API, using
+the agent radius / height from the yaml. The hook wraps `sim.reconfigure` so a scene's first
+episode (and its SPL denominator) is already scored on the re-baked mesh; a failed re-bake
+logs a warning and falls back to the shipped navmesh. Effect on the mesh itself is marginal
+(navigable area within ~2%, start/goal reachability unchanged, ~0.1-0.15 s per scene).
+
+When it is on, the server log shows:
+
+```
+[navmesh] rebake hook installed (cell_height=0.05)
+[navmesh] rebaked TEEsavR23oF at cell_height=0.05 (r=0.18, h=0.88): ok=True area=62.7m2 in 88ms
+```
+
+Where the other benchmarks stand (vertical offset of stored goals vs the loaded navmesh):
+HM3D v1, MP3D and R2R are clean (zero offset) and must be run WITHOUT the flag; RxR's
+worst offset (0.03 m) is irrelevant at its 3.0 m radius; HM3D-OVON carries the same
+0-0.15 m offsets but its 0.25 m radius absorbs them (measured: SR moves < 1.2 pt,
+p > 0.3 on all three splits) - leave it off there too, so numbers stay comparable
+with prior OVON evaluations.
+
 ### Velocity mapping
 
 Each step the policy decodes `(H, 3)` robot-local waypoints `[forward_m, lateral_m, yaw_rad]`,
@@ -149,6 +186,9 @@ MODEL_PATH=/path/to/checkpoint bash scripts/eval_habitat.sh
 # RxR (English) on GPUs 0 and 1
 MODEL_PATH=/path/to/checkpoint HABITAT_CONFIG=habitat_server/configs/vlnce_rxr.yaml \
     LANGUAGES="en-US en-IN" GPU_IDS="0 1" bash scripts/eval_habitat.sh
+# HM3D ObjectNav v2 (NAVMESH_CELL_HEIGHT is required, see "Navmesh alignment")
+MODEL_PATH=/path/to/checkpoint TASK=objectnav HABITAT_CONFIG=habitat_server/configs/objectnav_hm3d_v2.yaml \
+    SPLIT=val NAVMESH_CELL_HEIGHT=0.05 bash scripts/eval_habitat.sh
 # MP3D ObjectNav v1
 MODEL_PATH=/path/to/checkpoint TASK=objectnav HABITAT_CONFIG=habitat_server/configs/objectnav_mp3d.yaml \
     SPLIT=val bash scripts/eval_habitat.sh
