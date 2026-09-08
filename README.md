@@ -117,8 +117,9 @@ Val-unseen splits of R2R and the longer-horizon RxR.
 
 ### Object-Goal and Open-Vocabulary Navigation
 
-Success rate on the six ObjectNav settings. HM3D-OVON tests category names never seen in
-training, as synonyms and as entirely unseen classes.
+Success rate on the six ObjectNav settings (cells with two numbers report SR / SPL).
+HM3D-OVON tests category names never seen in training, as synonyms and as entirely
+unseen classes.
 
 | Model | MP3D | HM3D v1 | HM3D v2 | OVON Seen | OVON Syn. | OVON Unseen |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -127,7 +128,7 @@ training, as synonyms and as entirely unseen classes.
 | CogNav | 46.6 | 72.5 | — | — | — | — |
 | Uni-NaVid | — | 73.7 | — | 41.3 | 43.9 | 39.5 |
 | MTU3D | — | — | — | 55.0 | 45.0 | 40.8 |
-| **LightNav-0** | **53.3** | **74.5** | **79.5** | **55.3** | **53.3** | **47.0** |
+| **LightNav-0** | **53.3** | **74.5** | **77.2 / 41.5** | **55.3 / 31.2** | **54.6 / 29.6** | **47.0 / 24.2** |
 
 ### Embodied Visual Tracking (EVT-Bench)
 
