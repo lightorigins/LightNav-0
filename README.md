@@ -157,8 +157,9 @@ every policy driven through one shared 120° forward RGB interface and a 300-act
 | JanusVLN | 27.4 | 24.0 | 4.89 |
 | **LightNav-0** | **43.7** | **41.5** | **3.88** |
 
-Episodes and evaluation code are released separately; this repository ships the
-VLN-CE / ObjectNav and EVT-Bench harnesses.
+Episodes and evaluation code are released separately at
+[lightorigins/light-insight-bench](https://github.com/lightorigins/light-insight-bench/tree/main);
+this repository ships the VLN-CE / ObjectNav and EVT-Bench harnesses.
 
 ### Scaling Analysis
 
