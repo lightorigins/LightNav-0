@@ -194,6 +194,37 @@ def test_infer_batch_uses_vln_sample_builder_and_exposes_protocol_signals(monkey
     assert result.waypoints.tolist() == [[0.0, 0.0, 0.0]]
 
 
+def test_vln_sample_carries_optional_prompt_pointing(monkeypatch):
+    monkeypatch.setattr(
+        svc_mod,
+        "build_vln_traj_sample",
+        lambda video, instruction, frame_ids, bundle: {"video": video},
+    )
+    service = _service(_FakeEngine(), serve_task="vln")
+    session = _FakeSession("a")
+    session.prompt_pointing_ids = (1273, 1223)
+    assert service._build_sample_for_session(session) == {
+        "video": "tensor-a",
+        "_prompt_pointing_ids": (1273, 1223),
+    }
+
+
+def test_vln_sample_carries_staged_opos(monkeypatch):
+    monkeypatch.setattr(
+        svc_mod,
+        "build_vln_traj_sample",
+        lambda video, instruction, frame_ids, bundle: {"video": video},
+    )
+    service = _service(_FakeEngine(), serve_task="vln")
+    session = _FakeSession("a")
+    session.prompt_opos_id = 1223
+    assert service._build_sample_for_session(session) == {
+        "video": "tensor-a",
+        "_prompt_opos_id": 1223,
+        "_action_token_count": 1,
+    }
+
+
 def test_serve_task_is_validated():
     with pytest.raises(ValueError, match="serve_task"):
         _service(_FakeEngine(), serve_task="objectnav")

@@ -28,10 +28,11 @@ pip install -e ".[vllm,video,habitat]"      # vLLM backend + video/visualisation
 extra for the CPU test suite (`make test`). A Docker image is provided
 (`docker build -t lightnav0 .`, see [DEPLOYMENT.md](DEPLOYMENT.md)).
 
-**Blackwell sm_103 (B300 / B30Z):** PyPI's `torch 2.10.0` is a cu12.8 build, and its bundled
-NVRTC rejects `compute_103` — the `hf` backend then dies inside the Qwen3-VL vision tower
-with `nvrtc: error: invalid value for --gpu-architecture`. Install the cu12.9 wheels on those
-GPUs:
+**Blackwell GPUs (including RTX 5090 `sm_120` and B300/B30Z `sm_103`):** PyPI's
+`torch 2.10.0` is a cu12.8 build. On these GPUs, the cu12.8 stack can fail in the vLLM
+initialisation path (or the `hf` vision tower) with a native CUDA crash. In particular,
+the `hf` backend on `sm_103` can report `nvrtc: error: invalid value for --gpu-architecture`.
+Install the cu12.9 wheels on these GPUs:
 
 ```bash
 pip install --index-url https://download.pytorch.org/whl/cu129 \

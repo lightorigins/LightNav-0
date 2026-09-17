@@ -105,7 +105,9 @@ Engine-level environment variables (no flag):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `VLN_KV_CACHE_GIB` | auto | vLLM KV-cache size in GiB (auto-scales with `max_num_seqs`, floor 2 GiB) |
-| `VLN_VLLM_ENFORCE_EAGER` | `0` | `1` disables CUDA-graph capture (faster start, slower steps) |
+| `VLN_VLLM_ENFORCE_EAGER` | `0` | `1` selects vLLM O0/eager mode, disables custom CUDA ops and norm/activation fusions, and defaults attention to `TRITON_ATTN` (slower steps; recovery path for GPUs with native kernel launch faults) |
+| `VLN_VLLM_ASYNC_SCHEDULING` | `0` | `1` enables vLLM async CUDA-event scheduling (sync is safer for the multimodal path) |
+| `VLN_VLLM_ATTENTION_BACKEND` | auto | vLLM attention backend override, e.g. `TRITON_ATTN`; useful when the automatic FlashAttention kernel is unstable |
 | `LIGHTNAV_ATTN` | `sdpa` | attention implementation for the `hf` backend (e.g. `flash_attention_2`) |
 | `VLN_EVAL_TEMPERATURE` / `TOP_P` / `TOP_K` | greedy | sampling knobs for experiments; benchmark numbers assume they are unset |
 
@@ -160,4 +162,3 @@ Frames within one session must share one size (the first frame decides; `reset` 
 over). `keep` avoids geometric distortion but changes the token grid the model sees, which
 the released checkpoint was not trained on — validate on your robot before relying on it.
 Full native resolution (feeding the camera's own pixel count) is not supported.
-

@@ -44,6 +44,10 @@ class NavigationPolicy:
         self._write_pos: int = 0
         self._next_frame_id: int = 0
         self.instruction = ""
+        # 客户端可按帧提供输入 APOS/OPOS；None 表示保持原始模型执行。
+        self.prompt_pointing_ids: tuple[int, int] | None = None
+        # Opt-in staged mode: the model generates APOS, while the client supplies OPOS.
+        self.prompt_opos_id: int | None = None
         self._vit_cache = engine.new_vit_cache() if hasattr(engine, "new_vit_cache") else None
         # Model-frame size of this session. "stretch": always the checkpoint's video_size.
         # "keep": chosen from the first frame's aspect ratio at the same pixel budget.
@@ -88,6 +92,8 @@ class NavigationPolicy:
         self._write_pos = 0
         self._next_frame_id = 0
         self.instruction = instruction
+        self.prompt_pointing_ids = None
+        self.prompt_opos_id = None
         self.video_size = None
         if self._vit_cache is not None:
             self._vit_cache.clear()

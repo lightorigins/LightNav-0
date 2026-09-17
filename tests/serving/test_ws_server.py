@@ -92,6 +92,7 @@ def _pred(**overrides) -> SimpleNamespace:
     fields = dict(
         waypoints=np.zeros((10, 3), dtype=np.float32),
         stop=False,
+        stop_reason=None,
         visible=None,
         traj_id=7,
         tpos_id=None,
@@ -302,10 +303,46 @@ async def test_next_accepts_an_integral_float_seq():
     assert ws.sent == [{"action": "next", "data": {"rc": 0, "seq": 3, "msg": "image received"}}]
 
 
+async def test_next_passes_optional_prompt_pointing_to_session():
+    service = FakeService([_pred()])
+    message = json.dumps(
+        {
+            "action": "next",
+            "data": {
+                "seq": 4,
+                "image": _jpeg_b64(),
+                "instruction": "follow the saved route",
+                "prompt_pointing": {"apos_id": 1273, "opos_id": 1223},
+            },
+        }
+    )
+    await _run([message], service)
+    assert service.sessions[0].prompt_pointing_ids == (1273, 1223)
+
+
+async def test_next_accepts_opos_only_for_staged_pointing():
+    service = FakeService([_pred()])
+    message = json.dumps(
+        {
+            "action": "next",
+            "data": {
+                "seq": 5,
+                "image": _jpeg_b64(),
+                "instruction": "follow the saved route",
+                "prompt_pointing": {"opos_id": 1223},
+            },
+        }
+    )
+    await _run([message], service)
+    assert service.sessions[0].prompt_pointing_ids is None
+    assert service.sessions[0].prompt_opos_id == 1223
+
+
 async def test_success_response_matches_wire_contract():
     pred = _pred(
         waypoints=np.array([[1.0, 0.25, 0.1], [2.0, -0.5, -0.2]], dtype=np.float32),
         stop=True,
+        stop_reason="flat_stop_token",
         visible=False,
         traj_id=0,
         tpos_id=0,
@@ -325,12 +362,16 @@ async def test_success_response_matches_wire_contract():
         "actions": [[1.0, 0.25, 0.10000000149011612], [2.0, -0.5, -0.20000000298023224]],
     }
     assert data["stop"] is True
+    assert data["stop_reason"] == "flat_stop_token"
     assert data["visible"] is False
     assert data["raw_text"] == "<tpos_0><traj_0>"
     assert data["latency_ms"] >= 0.0
     assert data["timings_ms"] == {"llm_ms": 3.0}
     assert "pointing" not in data
-    assert set(data) == {"rc", "seq", "actions", "latency_ms", "stop", "visible", "timings_ms", "raw_text"}
+    assert set(data) == {
+        "rc", "seq", "actions", "latency_ms", "stop", "stop_reason", "visible",
+        "timings_ms", "raw_text",
+    }
     assert service.sessions[0].instruction == "go to the chair"
 
 
@@ -341,6 +382,7 @@ async def test_step_counts_every_buffered_frame_since_reset():
     assert ws.sent[2]["data"]["actions"]["step"] == 3
     assert ws.sent[2]["data"]["visible"] is None
     assert ws.sent[2]["data"]["stop"] is False
+    assert ws.sent[2]["data"]["stop_reason"] is None
     assert ws.sent[2]["data"]["raw_text"] == ""
 
 
@@ -457,6 +499,21 @@ async def test_observe_exception_is_nonfatal_and_sends_one_500():
             json.dumps({"action": "next", "data": {"seq": 1, "image": _jpeg_b64(), "instruction": 5}}),
             "next",
             "instruction must be a string",
+        ),
+        (
+            json.dumps(
+                {
+                    "action": "next",
+                    "data": {
+                        "seq": 1,
+                        "image": _jpeg_b64(),
+                        "instruction": "go",
+                        "prompt_pointing": {"apos_id": 1300, "opos_id": 0},
+                    },
+                }
+            ),
+            "next",
+            "prompt_pointing.apos_id must be in [0, 1300)",
         ),
         (
             json.dumps({"action": "next", "data": {"seq": 1, "image": "not-base64!", "instruction": "go"}}),

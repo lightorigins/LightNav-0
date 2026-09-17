@@ -11,9 +11,9 @@ Protocol (JSON text frames, one response per request; see docs/PROTOCOL.md):
 
     login {clientId?}                          -> {rc:0, msg:"ok"}
     reset {}                                   -> {rc:0, msg:"ok"}
-    next  {seq, image (JPEG b64), instruction} -> {rc:0, seq, actions:{step, actions},
-                                                   stop, visible, latency_ms, timings_ms,
-                                                   raw_text, [pointing]}
+    next  {seq, image (JPEG b64), instruction, prompt_pointing?} -> {rc:0, seq, actions:{step, actions},
+                                                   stop, stop_reason, visible, latency_ms,
+                                                   timings_ms, raw_text, [pointing]}
 
 A ``next`` whose instruction is empty or null only buffers the frame and is
 acknowledged with ``{rc:0, seq, msg:"image received"}``.
@@ -59,7 +59,12 @@ from lightnav.serving.token_budget import (
 )
 from lightnav.serving.tracking_service import BatchedTrackingService
 from lightnav.tracking import load_centroids
-from lightnav.vln_utils import DEFAULT_TRAJ_HORIZON, DEFAULT_TRAJ_K
+from lightnav.vln_utils import (
+    APOS_VOCAB_SIZE,
+    DEFAULT_TRAJ_HORIZON,
+    DEFAULT_TRAJ_K,
+    OPOS_VOCAB_SIZE,
+)
 
 __all__ = [
     "SERVER_LOG_TAG",
@@ -214,6 +219,39 @@ def _parse_seq(data: Mapping[str, object]) -> int:
     return seq
 
 
+def _parse_prompt_pointing(data: Mapping[str, object]) -> tuple[int, int] | int | None:
+    """Validate optional model input pointing.
+
+    A pair keeps the legacy one-shot APOS+OPOS prefix. Supplying only ``opos_id``
+    opts into staged decoding: the model generates APOS first, then receives this OPOS.
+    """
+    raw = data.get("prompt_pointing")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise _RequestDispatchError("prompt_pointing must be an object")
+
+    has_apos = "apos_id" in raw
+    has_opos = "opos_id" in raw
+    if not has_apos and not has_opos:
+        raise _RequestDispatchError("prompt_pointing requires opos_id or apos_id")
+    if not has_opos:
+        raise _RequestDispatchError("prompt_pointing.opos_id is required")
+    opos_id = raw.get("opos_id")
+    if isinstance(opos_id, bool) or not isinstance(opos_id, int):
+        raise _RequestDispatchError("prompt_pointing.opos_id must be an integer")
+    if not 0 <= opos_id < OPOS_VOCAB_SIZE:
+        raise _RequestDispatchError(f"prompt_pointing.opos_id must be in [0, {OPOS_VOCAB_SIZE})")
+    if not has_apos:
+        return opos_id
+    apos_id = raw.get("apos_id")
+    if isinstance(apos_id, bool) or not isinstance(apos_id, int):
+        raise _RequestDispatchError("prompt_pointing.apos_id must be an integer")
+    if not 0 <= apos_id < APOS_VOCAB_SIZE:
+        raise _RequestDispatchError(f"prompt_pointing.apos_id must be in [0, {APOS_VOCAB_SIZE})")
+    return apos_id, opos_id
+
+
 def _success_response(pred, seq: int, latency_ms: float, session, rgb: np.ndarray) -> dict:
     raw_text = str(getattr(pred, "raw_text", "") or "")
     data: dict[str, object] = {
@@ -222,6 +260,7 @@ def _success_response(pred, seq: int, latency_ms: float, session, rgb: np.ndarra
         "actions": actions_payload(pred.waypoints, step=int(getattr(session, "_buffer_len", 0))),
         "latency_ms": float(latency_ms),
         "stop": bool(pred.stop),
+        "stop_reason": getattr(pred, "stop_reason", None),
         "visible": None if pred.visible is None else bool(pred.visible),
         "timings_ms": dict(getattr(pred, "timings_ms", {}) or {}),
         "raw_text": _bounded_raw_text(raw_text),
@@ -370,6 +409,7 @@ def make_handler(service, recorder=None):
 
                     elif action == "next":
                         seq = _parse_seq(data)
+                        prompt_pointing = _parse_prompt_pointing(data)
                         img_b64 = data.get("image")
                         if not isinstance(img_b64, str) or not img_b64:
                             raise _RequestDispatchError("missing image")
@@ -381,6 +421,15 @@ def make_handler(service, recorder=None):
                         else:
                             instruction = instruction_value
                         current_session = ensure_session()
+                        if isinstance(prompt_pointing, tuple):
+                            current_session.prompt_pointing_ids = prompt_pointing
+                            current_session.prompt_opos_id = None
+                        elif isinstance(prompt_pointing, int):
+                            current_session.prompt_pointing_ids = None
+                            current_session.prompt_opos_id = prompt_pointing
+                        else:
+                            current_session.prompt_pointing_ids = None
+                            current_session.prompt_opos_id = None
                         try:
                             rgb, image_bytes = _decode_jpeg_b64_with_bytes(img_b64)
                         except Exception as exc:

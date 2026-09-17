@@ -74,7 +74,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_MODULE="lightnav.serving.ws_server"
 PID_FILE="$REPO_ROOT/.servers.pids"
 READY_DIR="$REPO_ROOT/.servers_ready"
-export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
+# Do not inherit ROS/Gazebo's Python 3.12 modules into the Python 3.11
+# inference process.  Importing a ROS extension from that path can crash the
+# interpreter before lightnav has a chance to report a useful error.
+export PYTHONPATH="$REPO_ROOT/src"
 
 # Pick the Python interpreter. Override with INFER_VENV=/path/to/venv; defaults
 # to $REPO_ROOT/.venv, else PATH `python`.
@@ -85,10 +88,17 @@ if [ -x "$INFER_VENV/bin/python" ]; then
     # nvidia libs over any older system libnvJitLink.so.12. Without this
     # `import torch` can fail with an undefined nvJitLink symbol.
     NV_LIBS=$(echo "$INFER_VENV"/lib/python*/site-packages/nvidia/*/lib 2>/dev/null | tr ' ' ':')
-    [ -n "$NV_LIBS" ] && export LD_LIBRARY_PATH="$NV_LIBS:${LD_LIBRARY_PATH:-}"
+    # ROS prepends Gazebo/OGRE libraries (often with ABI-incompatible CUDA
+    # dependencies) through LD_LIBRARY_PATH.  Keep only the venv's bundled
+    # CUDA libraries; the system linker still supplies libc and libstdc++.
+    [ -n "$NV_LIBS" ] && export LD_LIBRARY_PATH="$NV_LIBS"
 else
     echo "[start_servers] WARN: $INFER_VENV not found; using PATH python."
     PY="python"
+    # A PATH-provided interpreter must not accidentally load ROS's native
+    # libraries either.  Leave LD_LIBRARY_PATH unset and use default linker
+    # paths in this fallback mode.
+    unset LD_LIBRARY_PATH
 fi
 
 mkdir -p "$LOG_DIR" "$READY_DIR"

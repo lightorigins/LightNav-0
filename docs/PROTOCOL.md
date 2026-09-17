@@ -26,7 +26,8 @@ client's own inbound limit rarely matters; raise it if your library complains.
 ```json
 {"action": "login", "data": {"clientId": "<string, optional>"}}
 {"action": "reset", "data": {}}
-{"action": "next",  "data": {"seq": <int>, "image": "<base64 JPEG>", "instruction": "<string or null>"}}
+{"action": "next",  "data": {"seq": <int>, "image": "<base64 JPEG>", "instruction": "<string or null>", "prompt_pointing": {"apos_id": <int>, "opos_id": <int>}}}
+{"action": "next",  "data": {"seq": <int>, "image": "<base64 JPEG>", "instruction": "<string or null>", "prompt_pointing": {"opos_id": <int>}}}
 ```
 
 * `clientId`, when present, must be a string or `null`.
@@ -39,6 +40,13 @@ client's own inbound limit rarely matters; raise it if your library complains.
   always appended to the session buffer first; if the instruction is empty the
   server acknowledges the frame and does not run the model. This lets a client
   pre-fill the history window before the first prediction.
+* `prompt_pointing` is optional. Supplying both fields keeps the legacy one-shot path:
+  the server appends `<apos_K><opos_K>` before generation. Supplying only `opos_id`
+  opts into staged decoding for grid dual-pointing checkpoints: the model first
+  generates one APOS token, then the server appends that APOS plus the supplied OPOS
+  and generates the action token(s). `apos_id` is in `[0, 1300)` and `opos_id` is in
+  `[0, 1297)`. Omitting the object keeps the original prompt unchanged. Staged mode
+  reuses the ViT result but performs two LLM calls; it does not reuse LLM KV cache.
 
 ## Responses
 
@@ -69,6 +77,7 @@ client's own inbound limit rarely matters; raise it if your library complains.
     },
     "latency_ms": 143.2,
     "stop": false,
+    "stop_reason": null,
     "visible": true,
     "timings_ms": {"batch_size": 1.0, "queue_wait_ms": 0.4, "vit_ms": 61.0, "llm_ms": 70.1, "...": 0.0},
     "raw_text": "<tpos_12><traj_57>",
@@ -83,6 +92,7 @@ client's own inbound limit rarely matters; raise it if your library complains.
 | `actions.actions` | `[[float, float, float] x H]` | the predicted waypoint chunk, see *Waypoint convention*. Values are float32 converted to JSON numbers (e.g. `0.10000000149011612`). |
 | `latency_ms` | float | wall time of the prediction on the server, including micro-batch queue wait, ViT, LLM decode and waypoint decode. |
 | `stop` | bool | the model predicted the stop action (the decoded waypoint chunk is all zeros). |
+| `stop_reason` | string or null | why `stop` is true: `rvq_stop_code` for an explicit RVQ stop code, `rvq_near_zero_waypoints` when RVQ decoding lands inside the near-zero threshold, `rvq_zero_waypoints` when an older/custom RVQ bundle has no declared stop code, or `flat_stop_token` for `<traj_0>`. `null` while moving. |
 | `visible` | bool or null | whether the target is visible, when the checkpoint emits a grounding token: `<tpos_k>` decodes to a visibility bit; grid pointing uses `opos_id > 0`; `posxy` pointing uses `<opos>` present (true) / `<novis>` (false). `null` for checkpoints without grounding tokens. |
 | `timings_ms` | object | server stage timings (`batch_size`, `queue_wait_ms`, `build_sample_ms`, `vit_ms`, `llm_ms`, `decode_waypoints_ms`, `batch_total_ms`, plus ViT cache counters when available). Optional for clients; may change. |
 | `raw_text` | string | the model's raw output tokens for this step, truncated to 256 characters (with `...`) if longer. For debugging. |

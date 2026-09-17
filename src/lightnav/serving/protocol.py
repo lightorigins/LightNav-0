@@ -14,6 +14,7 @@ from lightnav.vln_utils import (
     decode_point_pixel_center,
     decode_posxy_center,
     decode_target_pos,
+    parse_rvq_action_tokens,
     parse_traj_token,
     point_cell_is_clamped,
     posxy_channels,
@@ -29,6 +30,7 @@ from lightnav.vln_utils import (
 class PredictionSignals:
     traj_id: int | None   # None for RVQ ckpts (no single <traj_k> id)
     stop: bool
+    stop_reason: str | None
     visible: bool | None
     tpos_id: int | None
     apos_id: int | None = None   # dual-pointing ckpts only; None otherwise
@@ -41,6 +43,7 @@ def decode_prediction_signals(
     *,
     is_rvq: bool = False,
     waypoints: np.ndarray | None = None,
+    rvq_stop_l0: int | None = None,
 ) -> PredictionSignals:
     """Parse server-visible status fields from model text.
 
@@ -79,9 +82,23 @@ def decode_prediction_signals(
     if is_rvq:
         if waypoints is None:
             raise ValueError("decode_prediction_signals(is_rvq=True) needs waypoints for the stop signal")
+        stop = bool(np.allclose(waypoints, 0.0))
+        stop_reason = None
+        if stop:
+            if rvq_stop_l0 is None:
+                # Older/custom bundles may not declare the dedicated stop code.
+                stop_reason = "rvq_zero_waypoints"
+            else:
+                codes = parse_rvq_action_tokens(raw_text)
+                stop_reason = (
+                    "rvq_stop_code"
+                    if codes[0] == int(rvq_stop_l0)
+                    else "rvq_near_zero_waypoints"
+                )
         return PredictionSignals(
             traj_id=None,
-            stop=bool(np.allclose(waypoints, 0.0)),
+            stop=stop,
+            stop_reason=stop_reason,
             visible=visible,
             tpos_id=tpos_id,
             apos_id=apos_id,
@@ -93,6 +110,7 @@ def decode_prediction_signals(
     return PredictionSignals(
         traj_id=traj_id,
         stop=(traj_id == 0),
+        stop_reason="flat_stop_token" if traj_id == 0 else None,
         visible=visible,
         tpos_id=tpos_id,
         apos_id=apos_id,

@@ -85,7 +85,7 @@ def generate_launch_description() -> LaunchDescription:
                         "q_yaw": 1.0,
                         "r_v": 0.1,
                         "r_w": 0.1,
-                        "v_output_scale": 2.0,
+                        "v_output_scale": 1.0,
                         "w_output_scale": 1.0,
                     }
                 ],

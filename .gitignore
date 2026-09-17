@@ -16,6 +16,14 @@ dist/
 .servers.pids
 logs/
 *.log
+/log/
+
+# local transfer bundles and operator notes
+/*.tar.zst
+/traffic_scene_bundle.part-*
+/BUNDLE_README.md
+/TRAFFIC_SCENE_BUNDLE_README.md
+/xc.md
 
 # evaluation outputs and local datasets / checkpoints (repo root only)
 /output/

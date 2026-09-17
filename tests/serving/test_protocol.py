@@ -16,6 +16,7 @@ def test_decode_prediction_signals_for_stop_without_tpos():
 
     assert signals.traj_id == 0
     assert signals.stop is True
+    assert signals.stop_reason == "flat_stop_token"
     assert signals.visible is None
     assert signals.tpos_id is None
 
@@ -25,6 +26,7 @@ def test_decode_prediction_signals_for_invisible_tpos():
 
     assert signals.traj_id == 3
     assert signals.stop is False
+    assert signals.stop_reason is None
     assert signals.visible is False
     assert signals.tpos_id == 0
 
@@ -57,7 +59,28 @@ def test_decode_prediction_signals_rvq_stop_is_zero_waypoints():
 
     assert signals.traj_id is None
     assert signals.stop is True
+    assert signals.stop_reason == "rvq_zero_waypoints"
     assert signals.visible is False
+
+
+def test_decode_prediction_signals_distinguishes_rvq_stop_code_from_near_zero_decode():
+    waypoints = np.zeros((10, 3), dtype=np.float32)
+
+    explicit = decode_prediction_signals(
+        "<act_l0_6><act_l1_122><act_l2_174>",
+        is_rvq=True,
+        waypoints=waypoints,
+        rvq_stop_l0=6,
+    )
+    near_zero = decode_prediction_signals(
+        "<act_l0_5><act_l1_10><act_l2_20>",
+        is_rvq=True,
+        waypoints=waypoints,
+        rvq_stop_l0=6,
+    )
+
+    assert explicit.stop_reason == "rvq_stop_code"
+    assert near_zero.stop_reason == "rvq_near_zero_waypoints"
 
 
 def test_decode_prediction_signals_rvq_requires_waypoints():

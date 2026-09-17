@@ -17,6 +17,7 @@ import numpy as np
 from lightnav.inference.samples import build_tracking_sample, build_vln_traj_sample
 from lightnav.serving.batcher import MicroBatchScheduler
 from lightnav.serving.protocol import decode_prediction_signals
+from lightnav.serving.token_budget import action_token_count
 from lightnav.tracking import TrackingAgent
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class _PredictRequest:
 class TrackingPrediction:
     waypoints: np.ndarray
     stop: bool
+    stop_reason: str | None
     visible: bool | None
     traj_id: int | None   # None for RVQ ckpts
     tpos_id: int | None
@@ -107,8 +109,17 @@ class BatchedTrackingService:
         video = session._get_video_tensor()
         frame_ids = list(session._history_frame_ids)
         if self.serve_task == "vln":
-            return build_vln_traj_sample(video, session.instruction, frame_ids, self.bundle)
-        return build_tracking_sample(video, session.instruction, frame_ids, self.bundle)
+            sample = build_vln_traj_sample(video, session.instruction, frame_ids, self.bundle)
+        else:
+            sample = build_tracking_sample(video, session.instruction, frame_ids, self.bundle)
+        pointing = getattr(session, "prompt_pointing_ids", None)
+        if pointing is not None:
+            sample["_prompt_pointing_ids"] = pointing
+        prompt_opos = getattr(session, "prompt_opos_id", None)
+        if prompt_opos is not None:
+            sample["_prompt_opos_id"] = int(prompt_opos)
+            sample["_action_token_count"] = action_token_count(self.rvq_bundle)
+        return sample
 
     def _infer_batch(self, requests: list[_PredictRequest]) -> list[TrackingPrediction | BaseException]:
         """Runs in the scheduler's executor thread.
@@ -134,6 +145,14 @@ class BatchedTrackingService:
             texts: list[str] = []
             for s in sessions:
                 t_gen = time.monotonic()
+                generate_kwargs = {}
+                pointing = getattr(s, "prompt_pointing_ids", None)
+                if pointing is not None:
+                    generate_kwargs["prompt_pointing_ids"] = pointing
+                prompt_opos = getattr(s, "prompt_opos_id", None)
+                if prompt_opos is not None:
+                    generate_kwargs["prompt_opos_id"] = int(prompt_opos)
+                    generate_kwargs["action_token_count"] = action_token_count(self.rvq_bundle)
                 text, _ = self.engine.generate_from_frames(
                     s._get_video_tensor(),
                     s.instruction,
@@ -141,6 +160,7 @@ class BatchedTrackingService:
                     frame_ids=list(s._history_frame_ids),
                     max_new_tokens=self.max_new_tokens,
                     task_type=task_type,
+                    **generate_kwargs,
                 )
                 llm_ms_list.append((time.monotonic() - t_gen) * 1000.0)
                 texts.append(text)
@@ -158,12 +178,37 @@ class BatchedTrackingService:
             vit_caches = [getattr(s, "_vit_cache", None) for s in sessions]
             vit_results = self.engine.vit_forward_batch(samples, vit_caches=vit_caches)
             vit_ms = (time.monotonic() - t_vit) * 1000.0
-            # 3. ONE batched LLM generate for the whole batch.
-            t_llm = time.monotonic()
-            texts = self.engine.llm_generate_batch(vit_results, self.max_new_tokens)
-            llm_ms = (time.monotonic() - t_llm) * 1000.0
+            # 3. Keep the legacy one-shot batch intact. Staged sessions use two
+            # decode calls because vLLM 0.19 has no continuation/KV-cache API.
+            staged = [
+                i for i, s in enumerate(sessions)
+                if getattr(s, "prompt_opos_id", None) is not None
+            ]
+            normal = [i for i in range(n) if i not in staged]
+            texts = [""] * n
+            llm_ms_list = [0.0] * n
+            if normal:
+                t_llm = time.monotonic()
+                normal_texts = self.engine.llm_generate_batch(
+                    [vit_results[i] for i in normal], self.max_new_tokens
+                )
+                normal_ms = (time.monotonic() - t_llm) * 1000.0
+                for i, text in zip(normal, normal_texts):
+                    texts[i] = text
+                    llm_ms_list[i] = normal_ms
+            if staged:
+                t_llm = time.monotonic()
+                staged_texts = self.engine.llm_generate_two_stage_batch(
+                    [vit_results[i] for i in staged],
+                    [int(getattr(sessions[i], "prompt_opos_id")) for i in staged],
+                    self.max_new_tokens,
+                    action_token_count=action_token_count(self.rvq_bundle),
+                )
+                staged_ms = (time.monotonic() - t_llm) * 1000.0
+                for i, text in zip(staged, staged_texts):
+                    texts[i] = text
+                    llm_ms_list[i] = staged_ms
             vit_ms_list = [vit_ms] * n
-            llm_ms_list = [llm_ms] * n
             passthrough = [
                 {k: float(v) for k, v in (getattr(r, "timings", None) or {}).items()}
                 for r in vit_results
@@ -182,6 +227,7 @@ class BatchedTrackingService:
                     vocab_size=getattr(s, "K", None),
                     is_rvq=getattr(s, "rvq", None) is not None,
                     waypoints=waypoints,
+                    rvq_stop_l0=getattr(getattr(s, "rvq", None), "stop_l0", None),
                 )
             except Exception as exc:
                 decode_ms.append((time.monotonic() - t_decode) * 1000.0)
@@ -206,6 +252,7 @@ class BatchedTrackingService:
                 TrackingPrediction(
                     waypoints=waypoints,
                     stop=signals.stop,
+                    stop_reason=signals.stop_reason,
                     visible=signals.visible,
                     traj_id=signals.traj_id,
                     tpos_id=signals.tpos_id,

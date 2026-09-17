@@ -259,12 +259,51 @@ def load_vllm_engine(config: InferenceConfig, num_frames: int = 64) -> Any:
         kv_cache_bytes = int(float(kv_gib_env) * 1024**3)
     else:
         kv_cache_bytes = max(2 * 1024**3, max_num_seqs * 2048 * 150_000)
+    async_scheduling = os.environ.get("VLN_VLLM_ASYNC_SCHEDULING", "0").lower() in (
+        "1", "true", "yes"
+    )
+    enforce_eager = os.environ.get("VLN_VLLM_ENFORCE_EAGER", "0").lower() in (
+        "1", "true", "yes"
+    )
+    # Eager mode alone does not disable vLLM's O2 custom RMSNorm path.  That
+    # path can segfault in the native kernel on some Blackwell/driver
+    # combinations during the startup profile, before Python can recover.
+    # Keep the fast O2 path by default, but make the documented eager escape
+    # hatch safe by falling back to PyTorch's native normalization as well.
+    compilation_config = None
+    optimization_level = None
+    if enforce_eager:
+        optimization_level = 0
+        compilation_config = {
+            # O0/eager is the recovery path for GPUs where vLLM's native
+            # CUDA extensions fault during startup.  Disabling all custom
+            # ops is intentionally conservative; the normal O2 path is
+            # unchanged when VLN_VLLM_ENFORCE_EAGER is unset.
+            "custom_ops": ["none"],
+            "pass_config": {
+                "fuse_norm_quant": False,
+                "fuse_act_quant": False,
+            },
+        }
+    # FlashAttention is vLLM's default on recent NVIDIA GPUs, but its
+    # split-KV kernel can be unstable on some driver/GPU combinations (the
+    # failure is a native cuLaunchKernel segfault, so Python cannot recover).
+    # Keep the default automatic and expose a narrow escape hatch for a
+    # Triton/Flex fallback without changing the normal benchmark path.
+    attention_backend_env = os.environ.get("VLN_VLLM_ATTENTION_BACKEND", "").strip()
+    # The eager recovery path also avoids FlashInfer's JIT module loader, which
+    # can segfault on the same driver/GPU combinations as the native norm op.
+    # An explicit environment override still wins.
+    attention_backend = attention_backend_env or ("TRITON_ATTN" if enforce_eager else None)
 
     print(
         f"[lightnav] Loading vLLM engine from: {config_dir} (gpu_mem={gpu_mem_util}, "
         f"max_num_seqs={max_num_seqs}, kv_cache_gib={kv_cache_bytes / 1024**3:.1f}, "
-        f"num_frames={num_frames})"
+        f"num_frames={num_frames}, eager={enforce_eager})"
     )
+    engine_overrides: dict[str, Any] = {"compilation_config": compilation_config}
+    if optimization_level is not None:
+        engine_overrides["optimization_level"] = optimization_level
 
     llm = LLM(
         model=config_dir,
@@ -282,7 +321,19 @@ def load_vllm_engine(config: InferenceConfig, num_frames: int = 64) -> Any:
         # is unaffected and greedy output is identical. Set VLN_VLLM_ENFORCE_EAGER=1
         # to revert (faster startup / lower capture memory) if a tight
         # gpu_memory_utilization OOMs during graph capture.
-        enforce_eager=os.environ.get("VLN_VLLM_ENFORCE_EAGER", "0").lower() in ("1", "true", "yes"),
+        enforce_eager=enforce_eager,
+        **engine_overrides,
+        # The custom multimodal embedding path reuses host/device buffers across
+        # requests. Keep vLLM's CUDA-event scheduler synchronous by default; the
+        # async path can turn a delayed device error into a native segfault.
+        async_scheduling=async_scheduling,
+        # Optional vLLM AttentionBackendEnum name, e.g. TRITON_ATTN.  Leaving
+        # this unset preserves vLLM's automatic backend selection.
+        attention_backend=attention_backend,
+        # Vision Transformers have a separate backend selector in vLLM.  Keep
+        # it aligned with the language backend so a FlashAttention workaround
+        # actually covers the multimodal encoder too.
+        mm_encoder_attn_backend=attention_backend,
         enable_mm_embeds=True,
         enable_chunked_prefill=False,
         allowed_local_media_path="/",

@@ -22,6 +22,9 @@ class VitResult:
     video_embeds: "torch.Tensor | None"  # CPU tensor, post-pool
     video_grid_thw: "torch.Tensor | None"  # CPU tensor
     timings: dict = field(default_factory=dict)
+    # 可选的输入 pointing 语义 id，不是 tokenizer 内部 id。
+    prompt_pointing_ids: tuple[int, int] | None = None
+    prompt_opos_id: int | None = None
 
 
 def _get_sampling_params() -> dict[str, float | int | bool]:
@@ -240,6 +243,8 @@ class VLNInferenceEngine:
             (generated_text, latency_ms)
         """
         max_tok = max_new_tokens or self.max_new_tokens
+        prompt_pointing_ids = sample.get("_prompt_pointing_ids")
+        prompt_opos_id = sample.get("_prompt_opos_id")
 
         if self.backend == "hf":
             inputs = self.bundle.data_processor.process_sample(
@@ -247,7 +252,14 @@ class VLNInferenceEngine:
                 add_generation_prompt=True,
                 validate_video_shapes=False,
             )
-            return self._generate_hf(inputs, max_tok)
+            if prompt_opos_id is not None:
+                return self._generate_hf_staged(
+                    inputs,
+                    max_tok,
+                    int(prompt_opos_id),
+                    int(sample.get("_action_token_count", max_tok)),
+                )
+            return self._generate_hf(inputs, max_tok, prompt_pointing_ids)
 
         if self.backend == "vllm_local":
             # ViT through the episode-local tubelet cache (the same path the batched
@@ -257,7 +269,13 @@ class VLNInferenceEngine:
             else:
                 res = self.vit_forward(sample)
             t0 = time.monotonic()
-            text = self.llm_generate_batch([res], max_tok)[0]
+            if prompt_opos_id is not None:
+                text = self.llm_generate_two_stage_batch(
+                    [res], [int(prompt_opos_id)], max_tok,
+                    action_token_count=int(sample.get("_action_token_count", max_tok)),
+                )[0]
+            else:
+                text = self.llm_generate_batch([res], max_tok)[0]
             llm_ms = (time.monotonic() - t0) * 1000
             data_prep_ms = res.timings.get(
                 "data_prep_ms",
@@ -280,6 +298,9 @@ class VLNInferenceEngine:
         frame_ids: list[int] | None = None,
         max_new_tokens: int | None = None,
         task_type: str = "tracking",
+        prompt_pointing_ids: tuple[int, int] | None = None,
+        prompt_opos_id: int | None = None,
+        action_token_count: int | None = None,
     ) -> tuple[str, float]:
         """
         Generate from a raw video tensor + instruction text.
@@ -296,12 +317,26 @@ class VLNInferenceEngine:
         """
         if task_type == "vlnce_traj":
             sample = build_vln_traj_sample(video_tensor, instruction, frame_ids, self.bundle)
+            if prompt_pointing_ids is not None:
+                sample["_prompt_pointing_ids"] = prompt_pointing_ids
+            if prompt_opos_id is not None:
+                sample["_prompt_opos_id"] = int(prompt_opos_id)
+                sample["_action_token_count"] = int(
+                    action_token_count or self._default_action_token_count()
+                )
             return self.generate(sample, max_new_tokens)
 
         if task_type != "tracking":
             raise ValueError(f"Unknown task_type: {task_type}")
 
         sample = build_tracking_sample(video_tensor, instruction, frame_ids, self.bundle)
+        if prompt_pointing_ids is not None:
+            sample["_prompt_pointing_ids"] = prompt_pointing_ids
+        if prompt_opos_id is not None:
+            sample["_prompt_opos_id"] = int(prompt_opos_id)
+            sample["_action_token_count"] = int(
+                action_token_count or self._default_action_token_count()
+            )
         return self.generate(sample, max_new_tokens)
 
     def _prepare_inputs(
@@ -354,6 +389,7 @@ class VLNInferenceEngine:
         self,
         inputs: dict[str, Any],
         max_new_tokens: int,
+        prompt_pointing_ids: tuple[int, int] | None = None,
     ) -> tuple[str, float]:
         prep_t0 = time.monotonic()
         gen = self._prepare_inputs(inputs)
@@ -366,6 +402,23 @@ class VLNInferenceEngine:
         # version-native path. (The vLLM backend never uses this; it recomputes
         # positions inside vLLM.)
         gen.pop("position_ids", None)
+        pointing_token_ids = self._prompt_pointing_token_ids(prompt_pointing_ids)
+        if pointing_token_ids:
+            suffix = torch.tensor(
+                [pointing_token_ids], dtype=gen["input_ids"].dtype, device=gen["input_ids"].device
+            )
+            gen["input_ids"] = torch.cat((gen["input_ids"], suffix), dim=1)
+            for key in ("attention_mask", "image_mask", "video_mask"):
+                value = gen.get(key)
+                if isinstance(value, torch.Tensor) and value.ndim == 2:
+                    fill = 1 if key == "attention_mask" else 0
+                    extension = torch.full(
+                        (value.shape[0], len(pointing_token_ids)),
+                        fill,
+                        dtype=value.dtype,
+                        device=value.device,
+                    )
+                    gen[key] = torch.cat((value, extension), dim=1)
 
         # Post-ViT pooling kwargs are emitted by the data processor and consumed
         # by model.forward() via the _post_vit_target attribute (set at build
@@ -445,6 +498,165 @@ class VLNInferenceEngine:
         }
         return text, latency_ms
 
+    def _default_action_token_count(self) -> int:
+        """Return the number of action tokens emitted by this checkpoint."""
+        if getattr(self.bundle, "action_method", "flat") == "rvq":
+            # The serving layer normally supplies the exact count from its RVQ bundle.
+            # Keep a conservative fallback for direct engine callers.
+            return max(1, int(self.max_new_tokens))
+        return 1
+
+    def _probe_token_family(self, formatter) -> list[int]:
+        tok = self.bundle.tokenizer
+        out: list[int] = []
+        for i in range(65536):
+            tid = tok.convert_tokens_to_ids(formatter(i))
+            if tid is None or tid == tok.unk_token_id:
+                break
+            out.append(int(tid))
+        return out
+
+    def _get_apos_token_ids(self) -> list[int]:
+        from lightnav.vln_utils import apos_token
+
+        ids = self._probe_token_family(apos_token)
+        if not ids:
+            raise ValueError(
+                "staged OPOS mode requires a grid pointing checkpoint with <apos_*> tokens"
+            )
+        return ids
+
+    def _get_action_token_ids(self) -> list[int]:
+        from lightnav.vln_utils import rvq_action_token, traj_token
+
+        if getattr(self.bundle, "action_method", "flat") == "rvq":
+            ids: list[int] = []
+            level = 0
+            while True:
+                level_ids = self._probe_token_family(
+                    lambda code, _level=level: rvq_action_token(_level, code)
+                )
+                if not level_ids:
+                    break
+                ids.extend(level_ids)
+                level += 1
+            if ids:
+                return ids
+        ids = self._probe_token_family(traj_token)
+        if not ids:
+            raise ValueError("No action tokens found in tokenizer for staged OPOS mode")
+        return ids
+
+    def _semantic_pointing_token_id(self, channel: str, value: int) -> int:
+        from lightnav.vln_utils import APOS_VOCAB_SIZE, OPOS_VOCAB_SIZE
+
+        limit = APOS_VOCAB_SIZE if channel == "apos" else OPOS_VOCAB_SIZE
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < limit:
+            raise ValueError(f"{channel}_id out of range: {value}")
+        tid = self.bundle.tokenizer.convert_tokens_to_ids(f"<{channel}_{value}>")
+        if tid is None or tid == self.bundle.tokenizer.unk_token_id:
+            raise ValueError(f"Token not found in tokenizer: <{channel}_{value}>")
+        return int(tid)
+
+    @staticmethod
+    def _append_input_tokens(gen: dict[str, Any], token_ids: list[int]) -> None:
+        if not token_ids:
+            return
+        suffix = torch.tensor(
+            [token_ids], dtype=gen["input_ids"].dtype, device=gen["input_ids"].device
+        )
+        gen["input_ids"] = torch.cat((gen["input_ids"], suffix), dim=1)
+        for key in ("attention_mask", "image_mask", "video_mask"):
+            value = gen.get(key)
+            if isinstance(value, torch.Tensor) and value.ndim == 2:
+                fill = 1 if key == "attention_mask" else 0
+                extension = torch.full(
+                    (value.shape[0], len(token_ids)), fill,
+                    dtype=value.dtype, device=value.device,
+                )
+                gen[key] = torch.cat((value, extension), dim=1)
+
+    def _generate_hf_staged(
+        self,
+        inputs: dict[str, Any],
+        max_new_tokens: int,
+        prompt_opos_id: int,
+        action_token_count: int,
+    ) -> tuple[str, float]:
+        """Generate APOS, append external OPOS, then generate action tokens.
+
+        This intentionally uses two ``generate`` calls. The processed video tensors are
+        reused, but transformers KV state is not exposed by the current backend.
+        """
+        prep_t0 = time.monotonic()
+        base = self._prepare_inputs(inputs)
+        base.pop("position_ids", None)
+        original_grid = base.pop("_original_video_grid_thw", None)
+        pool_factors = base.pop("_post_vit_pool_factors", None)
+        base.pop("_post_vit_pool_spatial", None)
+        post_vit_target = getattr(self.bundle.model, "_post_vit_target", None)
+        if post_vit_target is not None and original_grid is not None:
+            post_vit_target._post_vit_original_grid = original_grid
+            post_vit_target._post_vit_pool_factors = pool_factors
+        prepare_inputs_ms = (time.monotonic() - prep_t0) * 1000
+        apos_ids = self._get_apos_token_ids()
+        opos_tid = self._semantic_pointing_token_id("opos", prompt_opos_id)
+
+        model = self.bundle.model
+        if not getattr(model, "_lr_validate_kwargs_patched", False):
+            orig_validate = model._validate_model_kwargs
+            model._validate_model_kwargs = lambda kwargs: orig_validate(
+                {k: v for k, v in kwargs.items() if k not in ("image_mask", "video_mask")}
+            )
+            model._lr_validate_kwargs_patched = True
+
+        from transformers import LogitsProcessorList
+
+        sp = _get_sampling_params()
+        do_sample = sp["temperature"] > 0.0
+
+        def run(gen: dict[str, Any], count: int, allowed: list[int]):
+            vocab_size = int(model.get_output_embeddings().weight.shape[0])
+            mask = torch.full((vocab_size,), float("-inf"), device=self.bundle.device)
+            mask[torch.tensor(allowed, dtype=torch.long, device=self.bundle.device)] = 0.0
+            kwargs: dict[str, Any] = {
+                "min_new_tokens": count,
+                "max_new_tokens": count,
+                "do_sample": do_sample,
+                "pad_token_id": self.bundle.tokenizer.pad_token_id,
+                "eos_token_id": self.bundle.tokenizer.eos_token_id,
+                "logits_processor": LogitsProcessorList([lambda _ids, scores: scores + mask]),
+            }
+            if do_sample:
+                kwargs["temperature"] = sp["temperature"]
+            with torch.no_grad():
+                return model.generate(**gen, **kwargs)
+
+        t0 = time.monotonic()
+        first = run(dict(base), 1, apos_ids)
+        base_len = base["input_ids"].shape[1]
+        generated_apos = int(first[0][base_len].item())
+        stage1_text = self.bundle.tokenizer.decode([generated_apos], skip_special_tokens=False)
+        staged = dict(base)
+        self._append_input_tokens(staged, [generated_apos, opos_tid])
+        second = run(staged, max(1, int(action_token_count)), self._get_action_token_ids())
+        stage2_len = staged["input_ids"].shape[1]
+        stage2_text = self.bundle.tokenizer.decode(
+            second[0][stage2_len:], skip_special_tokens=False
+        )
+        latency_ms = (time.monotonic() - t0) * 1000
+        self._last_generate_timings = {
+            "data_prep_ms": prepare_inputs_ms,
+            "prepare_inputs_ms": prepare_inputs_ms,
+            "llm_ms": latency_ms,
+        }
+        return (
+            stage1_text
+            + self.bundle.tokenizer.decode([opos_tid], skip_special_tokens=False)
+            + stage2_text,
+            latency_ms,
+        )
+
     def _vit_forward_from_inputs(self, inputs: dict[str, Any]) -> "VitResult":
         """ViT forward + post-ViT pool from ALREADY-processed inputs. Cache bypassed.
 
@@ -510,6 +722,8 @@ class VLNInferenceEngine:
         )
         process_sample_ms = (time.monotonic() - proc_t0) * 1000
         res = self._vit_forward_from_inputs(inputs)
+        res.prompt_pointing_ids = sample.get("_prompt_pointing_ids")
+        res.prompt_opos_id = sample.get("_prompt_opos_id")
         res.timings["data_prep_ms"] = res.timings.get("data_prep_ms", 0.0) + process_sample_ms
         return res
 
@@ -625,14 +839,51 @@ class VLNInferenceEngine:
                 "vit_cache_misses": float(cache_stats.get("miss", 0)),
                 "vit_cache_size": float(len(vit_cache.cached_keys())),
             },
+            prompt_pointing_ids=sample.get("_prompt_pointing_ids"),
+            prompt_opos_id=sample.get("_prompt_opos_id"),
         )
+
+    def _prompt_pointing_token_ids(
+        self,
+        pointing: tuple[int, int] | list[int] | None,
+    ) -> list[int]:
+        """把协议中的 APOS/OPOS 语义 id 转成 checkpoint tokenizer id。"""
+        if pointing is None:
+            return []
+        from lightnav.vln_utils import APOS_VOCAB_SIZE, OPOS_VOCAB_SIZE
+
+        if not isinstance(pointing, (tuple, list)) or len(pointing) != 2:
+            raise ValueError("prompt_pointing_ids must be (apos_id, opos_id)")
+        apos_id, opos_id = pointing
+        if isinstance(apos_id, bool) or not isinstance(apos_id, int):
+            raise ValueError("apos_id must be an integer")
+        if isinstance(opos_id, bool) or not isinstance(opos_id, int):
+            raise ValueError("opos_id must be an integer")
+        if not 0 <= apos_id < APOS_VOCAB_SIZE:
+            raise ValueError(f"apos_id out of range: {apos_id}")
+        if not 0 <= opos_id < OPOS_VOCAB_SIZE:
+            raise ValueError(f"opos_id out of range: {opos_id}")
+
+        tokenizer = self.bundle.tokenizer
+        result = []
+        for token in (f"<apos_{apos_id}>", f"<opos_{opos_id}>"):
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id is None or token_id == tokenizer.unk_token_id:
+                raise ValueError(f"Token not found in tokenizer: {token}")
+            result.append(int(token_id))
+        return result
 
     def llm_generate_batch(self, items: list["VitResult"], max_new_tokens: int) -> list[str]:
         """Batched LLM decode: one vllm.LLM.generate call for all requests."""
         from vllm import SamplingParams
 
         prompt_dicts = [
-            _build_prompt_dict(it.prompt_ids, it.video_embeds, it.video_grid_thw) for it in items
+            _build_prompt_dict(
+                it.prompt_ids + self._prompt_pointing_token_ids(it.prompt_pointing_ids),
+                it.video_embeds,
+                it.video_grid_thw,
+            )
+            for it in items
         ]
         sp = _get_sampling_params()
         sp_kwargs: dict[str, Any] = {
@@ -654,6 +905,72 @@ class VLNInferenceEngine:
                 texts.append(self.bundle.tokenizer.decode(list(o.token_ids), skip_special_tokens=False))
             else:
                 texts.append(o.text)
+        return texts
+
+    def llm_generate_two_stage_batch(
+        self,
+        items: list["VitResult"],
+        prompt_opos_ids: list[int],
+        max_new_tokens: int,
+        *,
+        action_token_count: int | None = None,
+    ) -> list[str]:
+        """vLLM counterpart of staged APOS -> external OPOS -> action decoding."""
+        if len(items) != len(prompt_opos_ids):
+            raise ValueError("items and prompt_opos_ids must have equal length")
+        from vllm import SamplingParams
+
+        apos_ids = self._get_apos_token_ids()
+        opos_token_ids = [self._semantic_pointing_token_id("opos", int(v)) for v in prompt_opos_ids]
+        sp = _get_sampling_params()
+        base_prompts = [
+            _build_prompt_dict(it.prompt_ids, it.video_embeds, it.video_grid_thw) for it in items
+        ]
+        stage1_params = SamplingParams(
+            max_tokens=1,
+            temperature=sp["temperature"],
+            top_p=sp["top_p"],
+            **({"top_k": sp["top_k"]} if sp["top_k"] > 0 else {}),
+            allowed_token_ids=apos_ids,
+        )
+        first = self.vllm_engine.generate(base_prompts, stage1_params, use_tqdm=False)
+        generated_apos: list[int] = []
+        for out in first:
+            if not out.outputs or not out.outputs[0].token_ids:
+                raise RuntimeError("staged APOS decode returned no token")
+            generated_apos.append(int(out.outputs[0].token_ids[0]))
+
+        stage2_prompts = []
+        for it, apos_tid, opos_tid in zip(items, generated_apos, opos_token_ids):
+            stage2_prompts.append(
+                _build_prompt_dict(
+                    it.prompt_ids + [apos_tid, opos_tid], it.video_embeds, it.video_grid_thw
+                )
+            )
+        action_count = max(1, int(action_token_count or max_new_tokens))
+        stage2_kwargs: dict[str, Any] = {
+            "max_tokens": action_count,
+            "temperature": sp["temperature"],
+            "top_p": sp["top_p"],
+            "allowed_token_ids": self._get_action_token_ids(),
+        }
+        if sp["top_k"] > 0:
+            stage2_kwargs["top_k"] = sp["top_k"]
+        second = self.vllm_engine.generate(
+            stage2_prompts, SamplingParams(**stage2_kwargs), use_tqdm=False
+        )
+        texts: list[str] = []
+        for apos_tid, opos_tid, out in zip(generated_apos, opos_token_ids, second):
+            if out.outputs and out.outputs[0].token_ids:
+                action_text = self.bundle.tokenizer.decode(
+                    list(out.outputs[0].token_ids), skip_special_tokens=False
+                )
+            else:
+                action_text = out.outputs[0].text if out.outputs else ""
+            texts.append(
+                self.bundle.tokenizer.decode([apos_tid, opos_tid], skip_special_tokens=False)
+                + action_text
+            )
         return texts
 
     def _compute_vit_embeds_with_cache(
